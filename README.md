@@ -30,7 +30,7 @@ by simply using:
 
 ```bash
 ssh [andrew_id]@ghc[X].ghc.andrew.cmu.edu
-cd assignment3
+cd assignment-distributed-training
 source workspace/bin/activate
 ```
 
