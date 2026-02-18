@@ -164,3 +164,6 @@ workspace/
 *.hdf5
 *.out
 *.err
+
+# Personal notes
+ROADMAP.md

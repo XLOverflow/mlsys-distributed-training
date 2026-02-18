@@ -114,7 +114,17 @@ class ZeroDPStage3FCLayer(object):
         # We keep track of the original shard_size (without padding) for
         # later use in communication.
 
-        return (np.empty(8), 8)
+        flat = tensor.flatten()
+        import math
+        shard_size = math.ceil(len(flat) / num_shards)
+
+        # padding
+        pad_size = shard_size * num_shards - len(flat)
+        padded = np.concatenate([flat, np.zeros(pad_size, dtype=flat.dtype)])
+        start = shard_idx * shard_size
+        end   = start + shard_size
+
+        return padded[start:end], shard_size
 
     def zero_grad(self):
         self.grad_w_shard = np.zeros_like(self.w_shard)
@@ -142,10 +152,18 @@ class ZeroDPStage3FCLayer(object):
         self.x = x
 
         """TODO: Your code here"""
+        # reconstruct full_w
+        w_buf = np.empty(self.w_shard_size * self.dp_size, dtype=self.w_shard.dtype)
+        self.comm.Allgather(self.w_shard, w_buf)
+        full_w = w_buf[:self.w_numel].reshape(self.in_dim, self.out_dim)
 
+        # reconstruct full_b
+        b_buf = np.empty(self.b_shard_size * self.dp_size, dtype=self.b_shard.dtype)
+        self.comm.Allgather(self.b_shard, b_buf)
+        full_b = b_buf[:self.b_numel].reshape(1, self.out_dim)
 
-        raise NotImplementedError
-
+        return x @ full_w + full_b
+    
     def backward(self, output_grad: np.ndarray) -> List[np.ndarray]:
         """Backward pass under ZeRO-DP Stage 3.
 
@@ -179,8 +197,25 @@ class ZeroDPStage3FCLayer(object):
         """
 
         """TODO: Your code here"""
+        # reconstruct full_w
+        w_buf = np.empty(self.w_shard_size * self.dp_size, dtype=self.w_shard.dtype)
+        self.comm.Allgather(self.w_shard, w_buf)
+        full_w = w_buf[:self.w_numel].reshape(self.in_dim, self.out_dim)
 
-        raise NotImplementedError
+        # compute full gradients
+        grad_x = output_grad @ full_w.T
+        grad_w = self.x.T @ output_grad
+        grad_b = output_grad.sum(axis=0, keepdims=True)
+
+        # reduce-scatter grad_w into shard
+        grad_w_flat = np.pad(grad_w.flatten(), (0, self.w_shard_size * self.dp_size - self.w_numel))
+        self.comm.Reduce_scatter(grad_w_flat, self.grad_w_shard)
+
+        # reduce-scatter grad_b into shard
+        grad_b_flat = np.pad(grad_b.flatten(), (0, self.b_shard_size * self.dp_size - self.b_numel))
+        self.comm.Reduce_scatter(grad_b_flat, self.grad_b_shard)
+
+        return [grad_x]
 
 
 class ZeroDPMLPModel(object):
@@ -315,5 +350,9 @@ class ZeroDPAdam(object):
                 }
 
             """TODO: Your code here"""
-
-        raise NotImplementedError
+            state = self.state[key]
+            state["m"] = self.beta1 * state["m"] + (1 - self.beta1) * grad
+            state["v"] = self.beta2 * state["v"] + (1 - self.beta2) * (grad ** 2)
+            m_hat = state["m"] / (1 - self.beta1 ** self.step_idx)
+            v_hat = state["v"] / (1 - self.beta2 ** self.step_idx)
+            param -= self.lr * m_hat / (np.sqrt(v_hat) + self.eps)
